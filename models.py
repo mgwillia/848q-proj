@@ -110,7 +110,7 @@ class Guesser(BaseGuesser):
     def finetune(self, training_data: QantaDatabase, limit: int=-1):
         NUM_EPOCHS = 10
         BASE_BATCH_SIZE = 128
-        BATCH_SIZE = 128
+        BATCH_SIZE = 64
         LR_SCALE_FACTOR = BATCH_SIZE / BASE_BATCH_SIZE
 
         ### FIRST, PREP THE DATA ###
@@ -118,8 +118,8 @@ class Guesser(BaseGuesser):
         train_dataloader = torch.utils.data.DataLoader(train_dataset, num_workers=4, batch_size=BATCH_SIZE, pin_memory=True, drop_last=True, shuffle=True)
 
         ### THEN, TRAIN THE ENCODERS ###
-        question_optim = torch.optim.Adam(self.question_model.parameters(), lr=1e-5*LR_SCALE_FACTOR, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.0, amsgrad=False)
-        context_optim = torch.optim.Adam(self.context_model.parameters(), lr=1e-5*LR_SCALE_FACTOR, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.0, amsgrad=False)
+        question_optim = torch.optim.Adam(self.question_model.parameters(), lr=1e-5 * LR_SCALE_FACTOR, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.0, amsgrad=False)
+        context_optim = torch.optim.Adam(self.context_model.parameters(), lr=1e-5 * LR_SCALE_FACTOR, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.0, amsgrad=False)
         question_scheduler = self.get_guesser_scheduler(question_optim, 100, NUM_EPOCHS * (len(train_dataset) // BATCH_SIZE))
         context_scheduler = self.get_guesser_scheduler(context_optim, 100, NUM_EPOCHS * (len(train_dataset) // BATCH_SIZE))
         loss_fn = BiEncoderNllLoss()
