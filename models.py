@@ -384,6 +384,25 @@ class ReRanker(BaseReRanker):
 
             return torch.argmax(logits, dim=-1)
 
+    def get_best_document_batch(self, questions: List[str], ref_texts: List[str]) -> int:
+        """Selects the best reference text from a list of reference text for each question."""
+
+        with torch.no_grad():
+            inputs_A = []
+            batch_size = len(questions)
+            n_refs_per_ques = len(ref_texts) // batch_size
+            list(map(lambda x: inputs_A.extend([x] * n_refs_per_ques), questions))
+            inputs_B = ref_texts
+
+            model_inputs = self.tokenizer(
+                inputs_A, inputs_B, return_token_type_ids=True, padding=True, truncation=True,
+                return_tensors='pt').to(device)
+
+            model_outputs = self.model(**model_inputs)
+            logits = model_outputs.logits[:, 1].reshape(batch_size, n_refs_per_ques) # Label 1 means they are similar
+
+            return torch.argmax(logits, dim=-1).cpu()
+
 
 class Retriever:
     """The component that indexes the documents and retrieves the top document from an index for an input open-domain question.
@@ -417,6 +436,24 @@ class Retriever:
 
         best_doc_id = self.reranker.get_best_document(question, ref_texts)
         return guesses[best_doc_id][0]
+
+    def retrieve_answer_document_batch(self, questions: List[str], disable_reranking=False) -> List[str]:
+        """Returns the best guessed page that contains the answer to the question."""
+        guesses_comb = self.guesser.guess(questions, max_n_guesses=self.max_n_guesses)
+        guesses_comb = np.asarray(guesses_comb)
+        batch_size = len(questions)
+        if disable_reranking:
+            max_inds = np.expand_dims(np.argmax(np.asarray(guesses_comb)[:, :, 1], axis=-1), axis=-1)
+            best_pages = guesses_comb[np.arange(batch_size)[:, None], max_inds, :].reshape(batch_size, 2)[:, 0]
+            return best_pages
+
+        ref_texts = []
+        for guesses in guesses_comb:
+            for page, score in guesses:
+                doc = self.wiki_lookup[page]['text']
+                ref_texts.append(doc)
+        best_doc_ids = self.reranker.get_best_document_batch(questions, ref_texts)
+        return guesses_comb[np.arange(batch_size)[:, None], best_doc_ids.unsqueeze(1), :].reshape(batch_size, 2)[:, 0]
 
 
 class AnswerExtractor:
@@ -640,6 +677,23 @@ class AnswerExtractor:
         self.model.save_pretrained('models/extractor')
 
     def extract_answer(self, question: Union[str, List[str]], ref_text: Union[str, List[str]]) -> List[str]:
+        """Takes a (batch of) questions and reference texts and returns an answer text from the
+        reference which is answer to the input question.
+        """
+        with torch.no_grad():
+            model_inputs = self.tokenizer(
+                question, ref_text, return_tensors='pt', truncation=True, padding=True,
+                return_token_type_ids=True, add_special_tokens=True).to(device)
+            outputs = self.model(**model_inputs)
+            input_tokens = model_inputs['input_ids']
+            start_index = torch.argmax(outputs.start_logits, dim=-1)
+            end_index = torch.argmax(outputs.end_logits, dim=-1)
+
+            answer_ids = [tokens[s:e] for tokens, s, e in zip(input_tokens, start_index, end_index)]
+
+            return self.tokenizer.batch_decode(answer_ids)
+
+    def extract_answer_batch(self, question: Union[str, List[str]], ref_text: Union[str, List[str]]) -> List[str]:
         """Takes a (batch of) questions and reference texts and returns an answer text from the
         reference which is answer to the input question.
         """
