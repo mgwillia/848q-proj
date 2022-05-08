@@ -107,15 +107,15 @@ class Guesser(BaseGuesser):
 
         return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
 
-    def finetune(self, training_data: QantaDatabase, limit: int=-1):
-        NUM_EPOCHS = 10
+    def finetune(self, training_data: QantaDatabase, split_rule: str='full', limit: int=-1):
+        NUM_EPOCHS = 100
         BASE_BATCH_SIZE = 128
-        BATCH_SIZE = 64
+        BATCH_SIZE = 128
         LR_SCALE_FACTOR = BATCH_SIZE / BASE_BATCH_SIZE
 
         ### FIRST, PREP THE DATA ###
-        train_dataset = GuessTrainDataset(training_data, self.tokenizer, self.wiki_lookup, 'train')
-        train_dataloader = torch.utils.data.DataLoader(train_dataset, num_workers=4, batch_size=BATCH_SIZE, pin_memory=True, drop_last=True, shuffle=True)
+        train_dataset = GuessTrainDataset(training_data, self.tokenizer, self.wiki_lookup, 'train', split_rule)
+        train_dataloader = torch.utils.data.DataLoader(train_dataset, num_workers=16, batch_size=BATCH_SIZE, pin_memory=False, drop_last=True, shuffle=True)
 
         ### THEN, TRAIN THE ENCODERS ###
         question_optim = torch.optim.Adam(self.question_model.parameters(), lr=1e-5 * LR_SCALE_FACTOR, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.0, amsgrad=False)
@@ -128,27 +128,49 @@ class Guesser(BaseGuesser):
         self.question_model.train()
         self.context_model.train()
         for name, param in self.question_model.named_parameters():
+            #print(name)
             if 'layer' in name:
                 layer_num = int(name.split('.')[4])
                 if layer_num < 11:
-                    param.requires_grad = False
+                    pass#param.requires_grad = False
             else:
-                param.requires_grad = False
+                pass#param.requires_grad = False
         for name, param in self.context_model.named_parameters():
+            #print(name)
             if 'layer' in name:
                 layer_num = int(name.split('.')[4])
                 if layer_num < 11:
-                    param.requires_grad = False
+                    pass#param.requires_grad = False
             else:
-                param.requires_grad = False
+                pass#param.requires_grad = False
+
+        self.question_model = torch.nn.DataParallel(self.question_model)
+        self.context_model = torch.nn.DataParallel(self.context_model)
         losses = []
-        correct_preds_total = []
+        correct_question_preds_total = []
+        correct_biencoder_preds_total = []
         for epoch_num in range(NUM_EPOCHS):
             for batch_num, batch in enumerate(train_dataloader):
-                questions, answers = batch['question'].to(device), batch['answer_text'].to(device)
-                question_embeddings = self.question_model(questions).pooler_output
+                batch_questions, answers = batch['question'].to(device), batch['answer_text'].to(device)
+                random_sentences = None
+                last_sentences = None
+                if split_rule == 'last':
+                    valid_indices = batch['valid_indices']
+                    random_sentences = torch.zeros((batch_questions.shape[0], batch_questions.shape[-1]), dtype=torch.long).to(device)
+                    last_sentences = torch.zeros((batch_questions.shape[0], batch_questions.shape[-1]), dtype=torch.long).to(device)
+                    for item_idx, valid_index_list in enumerate(valid_indices):
+                        random_idx = random.randint(0, 1)
+                        last_idx = int(valid_index_list.split(',')[-1])
+                        #print('this should be 0 or 1', random_idx)
+                        #print('this should be 2', last_idx)
+                        random_sentences[item_idx] = batch_questions[item_idx][random_idx]
+                        last_sentences[item_idx] = batch_questions[item_idx][last_idx]
+                random_sentence_embeddings = self.question_model(random_sentences).pooler_output.detach()
+                last_sentence_embeddings = self.question_model(last_sentences).pooler_output
                 context_embeddings = self.context_model(answers).pooler_output
-                batch_loss, correct_preds = loss_fn(question_embeddings, context_embeddings, list(range(question_embeddings.shape[0])))
+                question_loss, correct_question_preds = loss_fn(random_sentence_embeddings, last_sentence_embeddings, list(range(last_sentence_embeddings.shape[0])))
+                biencoder_loss, correct_biencoder_preds = loss_fn(last_sentence_embeddings, context_embeddings, list(range(last_sentence_embeddings.shape[0])))
+                batch_loss = question_loss + biencoder_loss
 
                 question_optim.zero_grad()
                 context_optim.zero_grad()
@@ -159,17 +181,20 @@ class Guesser(BaseGuesser):
                 context_scheduler.step()
 
                 losses.append(batch_loss.item())
-                correct_preds_total.append(correct_preds.item())
+                correct_question_preds_total.append(correct_question_preds.item())
+                correct_biencoder_preds_total.append(correct_biencoder_preds.item())
 
                 if batch_num % 8 == 7:
-                    print(f'Epoch Num: {epoch_num}, Batch Num: {batch_num}, Loss: {np.array(losses).mean()}, Correct preds per batch: {np.array(correct_preds_total).mean()}', flush=True)
+                    print(f'Epoch Num: {epoch_num}, Batch Num: {batch_num}, Loss: {np.array(losses).mean()}, Correct question preds per batch: {np.array(correct_question_preds_total).mean()}, Correct biencoder preds per batch: {np.array(correct_biencoder_preds_total).mean()}', flush=True)
                     losses = []
-                    correct_preds_total = []
+                    correct_question_preds_total = []
+                    correct_biencoder_preds_total = []
 
-            torch.save(self.question_model, f'models/guesser_question_encoder_new_{epoch_num}.pth.tar')
-            torch.save(self.context_model, f'models/guesser_context_encoder_new_{epoch_num}.pth.tar')
-        torch.save(self.question_model, f'models/guesser_question_encoder_new.pth.tar')
-        torch.save(self.context_model, f'models/guesser_context_encoder_new.pth.tar')
+            if epoch_num % 5 == 0:
+                torch.save(self.question_model, f'models/guesser_question_encoder_{split_rule}_{epoch_num}.pth.tar')
+                torch.save(self.context_model, f'models/guesser_context_encoder_{split_rule}_{epoch_num}.pth.tar')
+        torch.save(self.question_model, f'models/guesser_question_encoder_{split_rule}.pth.tar')
+        torch.save(self.context_model, f'models/guesser_context_encoder_{split_rule}.pth.tar')
 
     def train(self, training_data: QantaDatabase, limit: int=-1):
         print('Running Guesser.train()', flush=True)
@@ -253,415 +278,12 @@ class Guesser(BaseGuesser):
         return d
 
 
-class ReRanker(BaseReRanker):
-    """A Bert based Reranker that consumes a reference passage and a question as input text and predicts the similarity score:
-        likelihood for the passage to contain the answer to the question.
-    """
-
-    def __init__(self) -> None:
-        self.tokenizer = None
-        self.model = None
-
-    def load(self, model_identifier: str, finetuned: str = "", max_model_length: int = 512):
-        self.tokenizer = AutoTokenizer.from_pretrained(model_identifier, model_max_length=max_model_length)
-
-        if finetuned == "":
-            self.model = AutoModelForSequenceClassification.from_pretrained(
-                model_identifier, num_labels=2).to(device)
-        else:
-            self.model = BertForSequenceClassification.from_pretrained(
-                finetuned, num_labels=2).to(device)
-
-    def get_prepped_reranker_dataset_split(self, guess_questions, wiki_data, first_sent=True):
-        train_questions = []
-        train_passages = []
-        train_labels = []
-        for guess_question in guess_questions:
-            if first_sent:
-                train_questions.append(guess_question.sentences[0])
-            else:
-                train_questions.append(guess_question.sentences[-1])
-            if random.randrange(0,3) < 2:
-                train_passages.append(wiki_data[guess_question.page]['text'].replace(guess_question.page.replace('_',' '), ' '))
-                train_labels.append(1)
-            else:
-                train_passages.append(wiki_data.get_random_passage_masked())
-                train_labels.append(0)
-
-        return datasets.Dataset.from_dict({'questions':train_questions, 'labels':train_labels, 'content':train_passages})
-
-    def get_prepped_reranker_data(self, first_sent=True):
-        qanta_db_train = QantaDatabase('data/qanta.train.2018.json')
-        qanta_db_dev = QantaDatabase('data/qanta.dev.2018.json')
-        wiki_data = WikiLookup('data/wiki_lookup.2018.json')
-
-        data_train = self.get_prepped_reranker_dataset_split(qanta_db_train.guess_train_questions, wiki_data, first_sent)
-        data_dev = self.get_prepped_reranker_dataset_split(qanta_db_dev.guess_dev_questions, wiki_data, first_sent)
-        data = datasets.DatasetDict({'train': data_train, 'validation': data_dev})
-        return data
-
-    def train(self, first_sent=True):
-        NUM_EPOCHS = 10
-        if first_sent:
-            MODEL_PATH = "models/reranker-first_sent-finetuned-full"
-        else:
-            MODEL_PATH = "models/reranker-last_sent-finetuned-full"
-
-
-        ### PREP MODEL ###
-        model_identifier = 'amberoad/bert-multilingual-passage-reranking-msmarco'
-        max_model_length = 512
-        tokenizer = AutoTokenizer.from_pretrained(model_identifier, model_max_length=max_model_length)
-        model = AutoModelForSequenceClassification.from_pretrained(model_identifier, num_labels=2)
-        optimizer = AdamW(model.parameters(), lr=3e-5)
-
-        ### PREP DATA ###
-        def preprocess_function(data):
-            return tokenizer(data["questions"], data["content"], truncation=True)
-
-        prepped_reranker_data = self.get_prepped_reranker_data(first_sent)
-        tokenized_dataset = prepped_reranker_data.map(preprocess_function, batched=True)
-
-        try:
-            tokenized_dataset = tokenized_dataset.remove_columns(["questions", "content"])
-        except:
-            print('WARNING: removing columns has failed!')
-        
-        tokenized_dataset.set_format("torch")
-
-        data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
-        train_dataloader = torch.utils.data.DataLoader(tokenized_dataset["train"], shuffle=True, batch_size=8, collate_fn=data_collator)
-        eval_dataloader = torch.utils.data.DataLoader(tokenized_dataset["validation"], batch_size=8, collate_fn=data_collator)
-
-
-        ### PREP TRAIN ###
-        accelerator = Accelerator()
-        train_dl, eval_dl, model, optimizer = accelerator.prepare(train_dataloader, eval_dataloader, model, optimizer)
-
-        num_training_steps = NUM_EPOCHS * len(train_dl)
-        lr_scheduler = get_scheduler(
-            "linear",
-            optimizer=optimizer,
-            num_warmup_steps=0,
-            num_training_steps=num_training_steps,
-        )
-
-        ### TRAIN ###
-        model.train()
-        losses = []
-        for epoch in range(NUM_EPOCHS):
-            for batch_num, batch in enumerate(train_dl):
-                outputs = model(**batch)
-                loss = outputs.loss
-                accelerator.backward(loss)
-
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
-
-                losses.append(loss.item())
-
-                if batch_num % 250 == 249:
-                    print(f'Epoch Num: {epoch}, Batch Num: {batch_num}, Loss: {np.array(losses).mean()}', flush=True)
-                    losses = []
-
-            model.save_pretrained(f'{MODEL_PATH}_{epoch}')
-        model.save_pretrained(MODEL_PATH)
-
-    def get_best_document(self, question: str, ref_texts: List[str]) -> int:
-        """Selects the best reference text from a list of reference text for each question."""
-        with torch.no_grad():
-            n_ref_texts = len(ref_texts)
-            inputs_A = [question] * n_ref_texts
-            inputs_B = ref_texts
-
-            model_inputs = self.tokenizer(
-                inputs_A, inputs_B, return_token_type_ids=True, padding=True, truncation=True,
-                return_tensors='pt').to(device)
-
-            model_outputs = self.model(**model_inputs)
-            logits = model_outputs.logits[:, 1]  # Label 1 means they are similar
-
-            return torch.argmax(logits, dim=-1)
-
-
-class Retriever:
-    """The component that indexes the documents and retrieves the top document from an index for an input open-domain question.
-
-    It uses two systems:
-     - Guesser that fetches top K documents for an input question, and
-     - ReRanker that then reranks these top K documents by comparing each of them with the question to produce a similarity score."""
-
-    def __init__(self, guesser: BaseGuesser, reranker: BaseReRanker, wiki_lookup: Union[str, WikiLookup],
-                 max_n_guesses=10) -> None:
-        if isinstance(wiki_lookup, str):
-            self.wiki_lookup = WikiLookup(wiki_lookup)
-        else:
-            self.wiki_lookup = wiki_lookup
-        self.guesser = guesser
-        self.reranker = reranker
-        self.max_n_guesses = max_n_guesses
-
-    def retrieve_answer_document(self, question: str, disable_reranking=False) -> str:
-        """Returns the best guessed page that contains the answer to the question."""
-        guesses = self.guesser.guess([question], max_n_guesses=self.max_n_guesses)[0]
-
-        if disable_reranking:
-            _, best_page = max((score, page) for page, score in guesses)
-            return best_page
-
-        ref_texts = []
-        for page, score in guesses:
-            doc = self.wiki_lookup[page]['text']
-            ref_texts.append(doc)
-
-        best_doc_id = self.reranker.get_best_document(question, ref_texts)
-        return guesses[best_doc_id][0]
-
-
-class AnswerExtractor:
-    """Load a huggingface model of type transformers.AutoModelForQuestionAnswering and finetune it for QuizBowl questions.
-
-    Documentation Links:
-
-        Extractive QA:
-            https://huggingface.co/docs/transformers/v4.16.2/en/task_summary#extractive-question-answering
-
-        QA Pipeline:
-            https://huggingface.co/docs/transformers/v4.16.2/en/main_classes/pipelines#transformers.QuestionAnsweringPipeline
-
-        QAModelOutput:
-            https://huggingface.co/docs/transformers/v4.16.2/en/main_classes/output#transformers.modeling_outputs.QuestionAnsweringModelOutput
-
-        Finetuning Answer Extraction:
-            https://huggingface.co/docs/transformers/master/en/custom_datasets#question-answering-with-squad
-    """
-
-    def __init__(self) -> None:
-        self.model = None
-        self.tokenizer = None
-        self.wiki_lookup = WikiLookup('data/wiki_lookup.2018.json')
-
-    def load(self, model_identifier: str, saved_model_path: str = None, max_model_length: int = 512):
-
-        # You don't need to re-train the tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(model_identifier, max_model_length=max_model_length)
-
-        # Finetune this model for QuizBowl questions
-        if saved_model_path is None:
-            self.model = AutoModelForQuestionAnswering.from_pretrained(
-                model_identifier).to(device)
-        else:
-            self.model = AutoModelForQuestionAnswering.from_pretrained(saved_model_path, local_files_only=True).to(device)
-
-    def gen_train_data(self, data):
-        pages = data['page']
-        answers = data['answer']
-        first_sentences = data['first_sentence']
-        last_sentences = data['last_sentence']
-
-        all_questions, references, splits = [], [], []
-        length = len(pages)
-        for i in range(length):
-            page = pages[i]
-            answer = answers[i]
-            first_sentence = first_sentences[i]
-            last_sentence = last_sentences[i]
-            ref_text = self.wiki_lookup[page]['text']
-            if ref_text.lower().find(answer) != -1:
-                answer_dict = {'answer_start': [ref_text.lower().find(answer)], 'text': [answer]}
-                all_questions.append(first_sentence)
-                references.append(ref_text)
-                splits.append(answer_dict)
-                all_questions.append(last_sentence)
-                references.append(ref_text)
-                splits.append(answer_dict)
-            ret_data = {'questions': all_questions, 'ref_texts': references, 'answers': splits}
-            return ret_data
-
-    def preprocess(self, data):
-        inputs = self.tokenizer(
-            data['questions'],
-            data['ref_texts'],
-            return_token_type_ids=True, padding=True, truncation=True, add_special_tokens=True,
-            return_offsets_mapping=True,
-        )
-
-        start_positions = []
-        end_positions = []
-        offset_mapping = inputs.pop("offset_mapping")
-        answers = data['answers']
-
-        for i, offset in enumerate(offset_mapping):
-            answer = answers[i]
-            start_char = answer["answer_start"][0]
-            end_char = answer["answer_start"][0] + len(answer["text"][0])
-            sequence_ids = inputs.sequence_ids(i)
-            # Find the start and end of the context
-            idx = 0
-            while sequence_ids[idx] != 1:
-                idx += 1
-            context_start = idx
-            while sequence_ids[idx] == 1:
-                idx += 1
-            context_end = idx - 1
-
-            # If the answer is not fully inside the context, label it (0, 0)
-            if offset[context_start][0] > end_char or offset[context_end][1] < start_char:
-                start_positions.append(0)
-                end_positions.append(0)
-            else:
-                # Otherwise it's the start and end token positions
-                idx = context_start
-                while idx <= context_end and offset[idx][0] <= start_char:
-                    idx += 1
-                start_positions.append(idx - 1)
-
-                idx = context_end
-                while idx >= context_start and offset[idx][1] >= end_char:
-                    idx -= 1
-                end_positions.append(idx + 1)
-
-        inputs["start_positions"] = start_positions
-        inputs["end_positions"] = end_positions
-        return inputs
-
-    def train(self):
-        """Fill this method with code that finetunes Answer Extraction task on QuizBowl examples.
-        Feel free to change and modify the signature of the method to suit your needs."""
-
-        NUM_EPOCHS = 10
-
-        # train_questions = QantaDatabase('data/qanta.train.2018.json').train_questions
-        # eval_questions = QantaDatabase('data/qanta.dev.2018.json').dev_questions
-
-        # modified from Huggingface QA fine tuning tutorial
-
-        def preprocess_function(examples):
-            questions = [q.strip() for q in examples["text"]]
-            first_sentences = [q.strip() for q in examples["first_sentence"]]
-            wiki_texts = list(map(lambda x: self.wiki_lookup[x]["text"], examples["page"]))
-            inputs = self.tokenizer(
-                [*questions, *first_sentences],
-                [*wiki_texts, *wiki_texts],
-                truncation=True,
-                return_offsets_mapping=True,
-                padding="max_length",
-            )
-
-            offset_mapping = inputs.pop("offset_mapping")
-            answers = [*examples["answer"], *examples["answer"]]
-            # print(len(answers))
-            start_positions = []
-            end_positions = []
-
-            for i, offset in enumerate(offset_mapping):
-                answer = answers[i]
-                start_char = 0
-                end_char = len(answer)
-                sequence_ids = inputs.sequence_ids(i)
-
-                # Find the start and end of the context
-                idx = 0
-                while sequence_ids[idx] != 1:
-                    idx += 1
-                context_start = idx
-                while sequence_ids[idx] == 1:
-                    idx += 1
-                context_end = idx - 1
-
-                # If the answer is not fully inside the context, label it (0, 0)
-                if offset[context_start][0] > end_char or offset[context_end][1] < start_char:
-                    start_positions.append(0)
-                    end_positions.append(0)
-                else:
-                    # Otherwise it's the start and end token positions
-                    idx = context_start
-                    while idx <= context_end and offset[idx][0] <= start_char:
-                        idx += 1
-                    start_positions.append(idx - 1)
-
-                    idx = context_end
-                    while idx >= context_start and offset[idx][1] >= end_char:
-                        idx -= 1
-                    end_positions.append(idx + 1)
-
-            inputs["start_positions"] = start_positions
-            inputs["end_positions"] = end_positions
-            return inputs
-
-        print("Dataset gen complete!")
-
-        training_dataset = datasets.load_dataset("json", data_files={"train": 'data/qanta.train.2018.json',
-                                                            "eval": 'data/qanta.dev.2018.json'}
-                                        , field="questions")
-
-        tokenized_train_dataset = training_dataset.map(preprocess_function, batched=True,
-                                                       remove_columns=training_dataset['train'].column_names)
-        print("Dataset preprocessing complete!")
-        tokenized_train_dataset.shuffle(seed=0)
-        data_collator = default_data_collator
-
-        training_args = TrainingArguments(output_dir="models/extractor",
-                                          save_total_limit=1,
-                                          load_best_model_at_end=True,
-                                          per_device_train_batch_size=4,
-                                          per_device_eval_batch_size=4,
-                                          num_train_epochs=NUM_EPOCHS,
-                                          metric_for_best_model="eval_loss",
-                                          fp16=True,
-                                          evaluation_strategy="epoch",
-                                          save_strategy="epoch",
-                                          #   save_strategy="no",
-                                          #   save_total_limit=6,
-                                          dataloader_num_workers=2,
-                                          logging_steps=72,
-                                          )
-
-        num_training_steps = NUM_EPOCHS * len(tokenized_train_dataset["train"])
-        optimizer = AdamW(self.model.parameters(), lr=2e-5, weight_decay=0.01)
-        lr_scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(
-            optimizer=optimizer,
-            num_warmup_steps=1 // 7 * num_training_steps // 5,
-            num_training_steps=num_training_steps // 5,
-            num_cycles=5,
-        )
-
-        trainer = Trainer(model=self.model,
-                          args=training_args,
-                          train_dataset=tokenized_train_dataset["train"],
-                          eval_dataset=tokenized_train_dataset["eval"],
-                          data_collator=data_collator,
-                          tokenizer=self.tokenizer,
-                          optimizers=(optimizer, lr_scheduler),
-                          callbacks=[EarlyStoppingCallback(early_stopping_patience=4)],
-                          )
-        trainer.train()
-        self.model.save_pretrained('models/extractor')
-
-    def extract_answer(self, question: Union[str, List[str]], ref_text: Union[str, List[str]]) -> List[str]:
-        """Takes a (batch of) questions and reference texts and returns an answer text from the
-        reference which is answer to the input question.
-        """
-        with torch.no_grad():
-            model_inputs = self.tokenizer(
-                question, ref_text, return_tensors='pt', truncation=True, padding=True,
-                return_token_type_ids=True, add_special_tokens=True).to(device)
-            outputs = self.model(**model_inputs)
-            input_tokens = model_inputs['input_ids']
-            start_index = torch.argmax(outputs.start_logits, dim=-1)
-            end_index = torch.argmax(outputs.end_logits, dim=-1)
-
-            answer_ids = [tokens[s:e] for tokens, s, e in zip(input_tokens, start_index, end_index)]
-
-            return self.tokenizer.batch_decode(answer_ids)
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--train_data", default="data/qanta.train.2018.json", type=str)
     parser.add_argument("--dev_data", default="data/qanta.dev.2018.json", type=str)
+    parser.add_argument("--split_rule", default="full", type=str)
     parser.add_argument("--limit", default=-1, type=int)
     parser.add_argument("--show_confusion_matrix", default=True, type=bool)
     parser.add_argument("--train_guesser", action="store_true")
@@ -678,7 +300,7 @@ if __name__ == "__main__":
 
         guesser = Guesser()
         guesser.load(from_checkpoint=False)
-        guesser.finetune(guesstrain, limit=flags.limit)
+        guesser.finetune(guesstrain, flags.split_rule, limit=flags.limit)
         guesser.train(guesstrain)
         guesser.build_faiss_index()
 
