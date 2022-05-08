@@ -107,21 +107,20 @@ class Guesser(BaseGuesser):
 
         return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
 
-    def finetune(self, training_data: QantaDatabase, split_rule: str='full', limit: int=-1):
-        NUM_EPOCHS = 100
+    def finetune(self, training_data: QantaDatabase, batch_size: int=128, learning_rate: float=1e-5, split_rule: str='full', scaling_param: float=1.0, limit: int=-1):
+        NUM_EPOCHS = 5
         BASE_BATCH_SIZE = 128
-        BATCH_SIZE = 128
-        LR_SCALE_FACTOR = BATCH_SIZE / BASE_BATCH_SIZE
+        LR_SCALE_FACTOR = batch_size / BASE_BATCH_SIZE
 
         ### FIRST, PREP THE DATA ###
         train_dataset = GuessTrainDataset(training_data, self.tokenizer, self.wiki_lookup, 'train', split_rule)
-        train_dataloader = torch.utils.data.DataLoader(train_dataset, num_workers=16, batch_size=BATCH_SIZE, pin_memory=False, drop_last=True, shuffle=True)
+        train_dataloader = torch.utils.data.DataLoader(train_dataset, num_workers=16, batch_size=batch_size, pin_memory=False, drop_last=True, shuffle=True)
 
         ### THEN, TRAIN THE ENCODERS ###
-        question_optim = torch.optim.Adam(self.question_model.parameters(), lr=1e-5 * LR_SCALE_FACTOR, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.0, amsgrad=False)
-        context_optim = torch.optim.Adam(self.context_model.parameters(), lr=1e-5 * LR_SCALE_FACTOR, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.0, amsgrad=False)
-        question_scheduler = self.get_guesser_scheduler(question_optim, 100, NUM_EPOCHS * (len(train_dataset) // BATCH_SIZE))
-        context_scheduler = self.get_guesser_scheduler(context_optim, 100, NUM_EPOCHS * (len(train_dataset) // BATCH_SIZE))
+        question_optim = torch.optim.Adam(self.question_model.parameters(), lr=learning_rate * LR_SCALE_FACTOR, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.0, amsgrad=False)
+        context_optim = torch.optim.Adam(self.context_model.parameters(), lr=learning_rate * LR_SCALE_FACTOR, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.0, amsgrad=False)
+        question_scheduler = self.get_guesser_scheduler(question_optim, 100, NUM_EPOCHS * (len(train_dataset) // batch_size))
+        context_scheduler = self.get_guesser_scheduler(context_optim, 100, NUM_EPOCHS * (len(train_dataset) // batch_size))
         loss_fn = BiEncoderNllLoss()
 
         print('Ready to finetune', flush=True)
@@ -152,25 +151,37 @@ class Guesser(BaseGuesser):
         for epoch_num in range(NUM_EPOCHS):
             for batch_num, batch in enumerate(train_dataloader):
                 batch_questions, answers = batch['question'].to(device), batch['answer_text'].to(device)
-                random_sentences = None
-                last_sentences = None
-                if split_rule == 'last':
+                if split_rule == 'full':
+                    question_embeddings = self.question_model(last_sentences).pooler_output
+                    context_embeddings = self.context_model(answers).pooler_output
+                    biencoder_loss, correct_biencoder_preds = loss_fn(question_embeddings, context_embeddings, list(range(question_embeddings.shape[0])))
+                elif split_rule == 'last-a':
+                    random_sentences = None
+                    last_sentences = None
                     valid_indices = batch['valid_indices']
                     random_sentences = torch.zeros((batch_questions.shape[0], batch_questions.shape[-1]), dtype=torch.long).to(device)
                     last_sentences = torch.zeros((batch_questions.shape[0], batch_questions.shape[-1]), dtype=torch.long).to(device)
                     for item_idx, valid_index_list in enumerate(valid_indices):
                         random_idx = random.randint(0, 1)
                         last_idx = int(valid_index_list.split(',')[-1])
-                        #print('this should be 0 or 1', random_idx)
-                        #print('this should be 2', last_idx)
                         random_sentences[item_idx] = batch_questions[item_idx][random_idx]
                         last_sentences[item_idx] = batch_questions[item_idx][last_idx]
-                random_sentence_embeddings = self.question_model(random_sentences).pooler_output.detach()
-                last_sentence_embeddings = self.question_model(last_sentences).pooler_output
-                context_embeddings = self.context_model(answers).pooler_output
-                question_loss, correct_question_preds = loss_fn(random_sentence_embeddings, last_sentence_embeddings, list(range(last_sentence_embeddings.shape[0])))
-                biencoder_loss, correct_biencoder_preds = loss_fn(last_sentence_embeddings, context_embeddings, list(range(last_sentence_embeddings.shape[0])))
-                batch_loss = question_loss + biencoder_loss
+                    random_sentence_embeddings = self.question_model(random_sentences).pooler_output.detach()
+                    last_sentence_embeddings = self.question_model(last_sentences).pooler_output
+                    context_embeddings = self.context_model(answers).pooler_output
+                    biencoder_loss, correct_biencoder_preds = loss_fn(last_sentence_embeddings, context_embeddings, list(range(last_sentence_embeddings.shape[0])))
+                    question_loss, correct_question_preds = loss_fn(random_sentence_embeddings, last_sentence_embeddings, list(range(last_sentence_embeddings.shape[0])))
+                elif split_rule == 'last-b':
+                    pass
+                elif split_rule == 'last-c':
+                    pass
+                elif split_rule == 'last-d':
+                    pass
+                    
+                if split_rule != 'full':
+                    batch_loss = question_loss * scaling_param + biencoder_loss
+                else:
+                    batch_loss = biencoder_loss
 
                 question_optim.zero_grad()
                 context_optim.zero_grad()
@@ -191,10 +202,10 @@ class Guesser(BaseGuesser):
                     correct_biencoder_preds_total = []
 
             if epoch_num % 5 == 0:
-                torch.save(self.question_model, f'models/guesser_question_encoder_{split_rule}_{epoch_num}.pth.tar')
-                torch.save(self.context_model, f'models/guesser_context_encoder_{split_rule}_{epoch_num}.pth.tar')
-        torch.save(self.question_model, f'models/guesser_question_encoder_{split_rule}.pth.tar')
-        torch.save(self.context_model, f'models/guesser_context_encoder_{split_rule}.pth.tar')
+                torch.save(self.question_model, f'models/guesser_question_encoder_{split_rule}_{batch_size}_{learning_rate}_{scaling_param}_{epoch_num}.pth.tar')
+                torch.save(self.context_model, f'models/guesser_context_encoder_{split_rule}_{batch_size}_{learning_rate}_{scaling_param}_{epoch_num}.pth.tar')
+        torch.save(self.question_model, f'models/guesser_question_encoder_{split_rule}_{batch_size}_{learning_rate}_{scaling_param}.pth.tar')
+        torch.save(self.context_model, f'models/guesser_context_encoder_{split_rule}_{batch_size}_{learning_rate}_{scaling_param}.pth.tar')
 
     def train(self, training_data: QantaDatabase, limit: int=-1):
         print('Running Guesser.train()', flush=True)
@@ -335,7 +346,10 @@ if __name__ == "__main__":
 
     parser.add_argument("--train_data", default="data/qanta.train.2018.json", type=str)
     parser.add_argument("--dev_data", default="data/qanta.dev.2018.json", type=str)
+    parser.add_argument("--batch_size", default=128, type=int)
+    parser.add_argument("--learning_rate", default=1e-5, type=float)
     parser.add_argument("--split_rule", default="full", type=str)
+    parser.add_argument("--scaling_param", default=1.0, type=float)
     parser.add_argument("--limit", default=-1, type=int)
     parser.add_argument("--show_confusion_matrix", default=True, type=bool)
     parser.add_argument("--train_guesser", action="store_true")
@@ -352,7 +366,7 @@ if __name__ == "__main__":
 
         guesser = Guesser()
         guesser.load(from_checkpoint=False)
-        guesser.finetune(guesstrain, flags.split_rule, limit=flags.limit)
+        guesser.finetune(guesstrain, flags.batch_size, flags.learning_rate, flags.split_rule, flags.scaling_param, limit=flags.limit)
         guesser.train(guesstrain)
         guesser.build_faiss_index()
 

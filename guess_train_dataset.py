@@ -66,7 +66,7 @@ class GuessTrainDataset(torch.utils.data.Dataset):
         if self.split_rule == 'full':
             question = self.questions[index]
             out = {'question': question.squeeze(), 'answer_text': self.answers[index].squeeze(), 'answer_page': self.answer_pages[index]}
-        else:
+        elif self.split_rule == 'last-a':
             #question = self.questions[index][random.randint(0, len(self.questions[index])-1)].squeeze()
             questions = self.questions[index].squeeze()
             if questions.dim() == 1:
@@ -76,4 +76,10 @@ class GuessTrainDataset(torch.utils.data.Dataset):
             valid_indices = ','.join([str(num) for num in range(questions.shape[0])])
             questions = F.pad(questions, (0, 0, 0, 3 - questions.shape[0]), 'constant', 0)
             out = {'question': questions, 'valid_indices': valid_indices, 'answer_text': self.answers[index].squeeze(), 'answer_page': self.answer_pages[index]}
+        elif self.split_rule == 'last-b':
+            pass
+        elif self.split_rule == 'last-c':
+            pass
+        elif self.split_rule == 'last-d':
+            pass
         return out

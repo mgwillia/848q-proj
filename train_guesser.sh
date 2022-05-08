@@ -12,4 +12,4 @@
 module load cuda/11.0.3
 
 srun bash -c "hostname;"
-srun bash -c "python models.py --split_rule last --train_guesser;"
+srun bash -c "python models.py --split_rule last-a --train_guesser;"
