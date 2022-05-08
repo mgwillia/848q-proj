@@ -278,6 +278,58 @@ class Guesser(BaseGuesser):
         return d
 
 
+class Retriever:
+    """The component that indexes the documents and retrieves the top document from an index for an input open-domain question.
+
+    It uses two systems:
+     - Guesser that fetches top K documents for an input question, and
+     - ReRanker that then reranks these top K documents by comparing each of them with the question to produce a similarity score."""
+
+    def __init__(self, guesser: BaseGuesser, reranker: BaseReRanker, wiki_lookup: Union[str, WikiLookup],
+                 max_n_guesses=10) -> None:
+        if isinstance(wiki_lookup, str):
+            self.wiki_lookup = WikiLookup(wiki_lookup)
+        else:
+            self.wiki_lookup = wiki_lookup
+        self.guesser = guesser
+        self.reranker = reranker
+        self.max_n_guesses = max_n_guesses
+
+    def retrieve_answer_document(self, question: str, disable_reranking=False) -> str:
+        """Returns the best guessed page that contains the answer to the question."""
+        guesses = self.guesser.guess([question], max_n_guesses=self.max_n_guesses)[0]
+
+        if disable_reranking:
+            _, best_page = max((score, page) for page, score in guesses)
+            return best_page
+
+        ref_texts = []
+        for page, score in guesses:
+            doc = self.wiki_lookup[page]['text']
+            ref_texts.append(doc)
+
+        best_doc_id = self.reranker.get_best_document(question, ref_texts)
+        return guesses[best_doc_id][0]
+
+    def retrieve_answer_document_batch(self, questions: List[str], disable_reranking=False) -> List[str]:
+        """Returns the best guessed page that contains the answer to the question."""
+        guesses_comb = self.guesser.guess(questions, max_n_guesses=self.max_n_guesses)
+        guesses_comb = np.asarray(guesses_comb)
+        batch_size = len(questions)
+        if disable_reranking:
+            max_inds = np.expand_dims(np.argmax(np.asarray(guesses_comb)[:, :, 1], axis=-1), axis=-1)
+            best_pages = guesses_comb[np.arange(batch_size)[:, None], max_inds, :].reshape(batch_size, 2)[:, 0]
+            return best_pages
+
+        ref_texts = []
+        for guesses in guesses_comb:
+            for page, score in guesses:
+                doc = self.wiki_lookup[page]['text']
+                ref_texts.append(doc)
+        best_doc_ids = self.reranker.get_best_document_batch(questions, ref_texts)
+        return guesses_comb[np.arange(batch_size)[:, None], best_doc_ids.unsqueeze(1), :].reshape(batch_size, 2)[:, 0]
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
