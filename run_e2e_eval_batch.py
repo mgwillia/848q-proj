@@ -14,6 +14,31 @@ GUESSER_MODEL_PATH = 'models/tfidf.pickle'
 BATCH_SIZE = 256  # Change this to 24 if using reranking and are on a 1080ti
 
 
+class myQuestion():
+    def __int__(self):
+        self.first_sentence = ''
+        self.sentences = []
+        self.qanta_id = -1
+        self.page = -1
+
+
+def get_squad_questions(filename: str):
+    questions = []
+    with open(filename, 'r') as fp:
+        data = json.load(fp)
+
+    for data_point in data['data']:
+        for paragraph in data_point['paragraphs']:
+            for ques in paragraph['qas']:
+                temp = myQuestion()
+                temp.page = data_point['title']
+                temp.sentences = [ques['question']]
+                temp.first_sentence = temp.sentences[0]
+                temp.qanta_id = ques['id']
+                questions.append(temp)
+    return questions
+
+
 def save_json(json_object: Mapping, filename: str):
     with open(f'outputs/{filename}', 'w') as fp:
         json.dump(pred_dict, fp, indent=4)
@@ -79,6 +104,19 @@ def generate_last_sent_predictions_batch(model: QuizBowlSystem, questions: Itera
             }
     return pred_dict
 
+def generate_full_predictions_batch(model: QuizBowlSystem, questions: Iterable[Question]):
+    pred_dict = {}
+    for i in tqdm(range(0, len(questions), BATCH_SIZE)):
+        ques = questions[min(i, len(questions) - 1): min(i + BATCH_SIZE, len(questions))]
+        first_sentences = list(map(lambda x: ".".join(x.sentences), ques))
+        answers = model.execute_query_batch(first_sentences, get_page=True)
+        for i, q in enumerate(ques):
+            pred_dict[q.qanta_id] = {
+                # 'answer': answers[i][0],
+                'page': answers[i]
+            }
+    return pred_dict
+
 
 def compute_retieval_metrics(prediction_dict: Mapping, questions: Iterable[Question]):
     N = 0
@@ -105,13 +143,13 @@ def compute_metrics(prediction_dict: Mapping, questions: Iterable[Question]):
         if ques.qanta_id in prediction_dict:
             # a_pred = prediction_dict[ques.qanta_id]['answer']
             p_pred = prediction_dict[ques.qanta_id]['page']
-            print(ques.first_sentence)
-            print(ques.sentences[-1])
-            print(p_pred, ques.page)
-            print('')
+            # print(ques.first_sentence)
+            # print(ques.sentences[-1])
+            # print(p_pred, ques.page)
+            # print('')
             # em += compute_em_multiple_answers(answers_gold, a_pred)
             # f1 += compute_f1_multiple_answers(answers_gold, a_pred)
-            ret_accuracy += 1 if ques.page == p_pred else 0
+            ret_accuracy += 1 if ques.page in p_pred else 0
 
     if N > 0:
         # em /= N
@@ -128,11 +166,13 @@ def compute_metrics(prediction_dict: Mapping, questions: Iterable[Question]):
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser()
     argparser.add_argument("--guesser_model", help="Pickle file path for TfidfGuesser model.",
-                           type=str, default="models/tfidf.pickle")
+                           type=str, default="models/tfidf_full.pickle")
     argparser.add_argument("--eval_dataset", help="Dataset Path for the eval dataset. Must be Qanta Json format.",
-                           type=str, default="../data/qanta.dev.2018.json")
+                           type=str, default="data/qanta.dev.2018.json")
+    argparser.add_argument("--dataset_type", choices=["qanta", "squad", "nq", "webq", "trivia", "trec"], type=str)
+    argparser.add_argument("--model_type", choices=["self", "dpr"], type=str)
     argparser.add_argument("--train_dataset", help="Dataset Path for the TRAIN dataset. Must be Qanta Json format.",
-                           type=str, default="../data/qanta.train.2018.json")
+                           type=str, default="data/qanta.train.2018.json")
     argparser.add_argument('--mode', type=str, choices=["predict", "eval"],
                            help="Only saves the predictions in predict mode. Also computes metrics in eval mode.")
 
@@ -152,37 +192,56 @@ if __name__ == "__main__":
     argparser.set_defaults(debug_run=False)
 
     # Load Dataset
-    eval_questions = QantaDatabase(args.eval_dataset).all_questions
-    train_questions = QantaDatabase(args.train_dataset).all_questions
+    if args.dataset_type == 'qanta':
+        eval_questions = QantaDatabase(args.eval_dataset).all_questions
+    elif args.dataset_type == 'squad':
+        eval_questions = get_squad_questions(args.eval_dataset)
+    else:
+        raise NotImplementedError
+    # import pdb
+    #
+    # pdb.set_trace()
+    # train_questions = QantaDatabase(args.train_dataset).all_questions
 
-    if args.debug_run:
-        print('Running only on 20 examples.')  # Change this to suit your iteration speed
-        eval_questions = eval_questions[:20]
-
+    # if args.debug_run:
+    #     print('Running only on 20 examples.')  # Change this to suit your iteration speed
+    #     eval_questions = eval_questions[:20]
+    #
     # Load the Model
-    model = QuizBowlSystem()
-    model.answer_extractor.train(train_questions)
-
+    model = QuizBowlSystem(args.dataset_type, args.model_type)
+    # model.answer_extractor.train()
+    #
     pred_dict = generate_first_sent_predictions_batch(model, eval_questions)
-    #pred_dict = json.load(open(args.first_sent_predictions, 'r'))
-    save_json(pred_dict, args.first_sent_predictions)
-    print('Saved first sentence predictions...\n')
-
+    # # pred_dict = json.load(open(args.first_sent_predictions, 'r'))
+    # # save_json(pred_dict, args.first_sent_predictions)
+    # # print('Saved first sentence predictions...\n')
+    # #
     if args.mode == 'eval':
         metrics = compute_metrics(pred_dict, eval_questions)
 
-        print(f'First Sent Exact Match Accuracy : {metrics["em"]:.2f}')
-        print(f'First Sent mean F1 score        : {metrics["f1"]:.2f}')
+        # print(f'First Sent Exact Match Accuracy : {metrics["em"]:.2f}')
+        # print(f'First Sent mean F1 score        : {metrics["f1"]:.2f}')
         print(f'First Sent Retrieval Accuracy   : {metrics["ret_accuracy"]:.2f}')
         print('')
 
     pred_dict = generate_last_sent_predictions_batch(model, eval_questions)
-    print('Saved last sentence predictions...\n')
-    save_json(pred_dict, args.last_sent_predictions)
-
+    # print('Saved last sentence predictions...\n')
+    # save_json(pred_dict, args.last_sent_predictions)
+    #
     if args.mode == 'eval':
         metrics = compute_metrics(pred_dict, eval_questions)
-
-        print(f'Last Sent Exact Match Accuracy : {metrics["em"]:.2f}')
-        print(f'Last Sent mean F1 score        : {metrics["f1"]:.2f}')
+    #
+    #     print(f'Last Sent Exact Match Accuracy : {metrics["em"]:.2f}')
+    #     print(f'Last Sent mean F1 score        : {metrics["f1"]:.2f}')
         print(f'Last Sent Retrieval Accuracy   : {metrics["ret_accuracy"]:.2f}')
+
+    pred_dict = generate_full_predictions_batch(model, eval_questions)
+    # print('Saved last sentence predictions...\n')
+    # save_json(pred_dict, args.last_sent_predictions)
+    #
+    if args.mode == 'eval':
+        metrics = compute_metrics(pred_dict, eval_questions)
+        #
+        #     print(f'Last Sent Exact Match Accuracy : {metrics["em"]:.2f}')
+        #     print(f'Last Sent mean F1 score        : {metrics["f1"]:.2f}')
+        print(f'Full Sent Retrieval Accuracy   : {metrics["ret_accuracy"]:.2f}')

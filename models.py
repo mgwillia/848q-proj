@@ -3,7 +3,7 @@ import os
 import random
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Union
-
+import json
 import datasets
 import faiss
 import numpy as np
@@ -25,6 +25,30 @@ from qbdata import QantaDatabase, WikiLookup
 
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+class myTrainPoint():
+    def __init__(self):
+        self.text = ''
+        self.page = ''
+
+
+class myTrainData():
+    def __init__(self):
+        self.guess_train_questions = []
+
+
+def get_squad_train():
+    data = myTrainData()
+    with open('data/squad1.1/train-v1.1.json', 'r') as fp:
+        raw_data = json.load(fp)
+    for data_point in raw_data['data']:
+        for paragraph in data_point['paragraphs']:
+            for ques in paragraph['qas']:
+                temp = myTrainPoint()
+                temp.page = data_point['title']
+                temp.text = ques['question']
+                data.guess_train_questions.append(temp)
+    return data
 
 
 class BiEncoderNllLoss(torch.nn.Module):
@@ -66,29 +90,39 @@ class BiEncoderNllLoss(torch.nn.Module):
 
 class Guesser(BaseGuesser):
     """You can implement your own Bert based Guesser here"""
-    def __init__(self) -> None:
+    def __init__(self, dataset_name) -> None:
         self.tokenizer = None
         self.question_model = None
         self.context_model = None
         self.wiki_lookup = None
         self.index = None
+        self.dataset_name = dataset_name
 
     def load(self, from_checkpoint=True):
         self.tokenizer = BertTokenizerFast.from_pretrained("bert-base-uncased")
         self.wiki_lookup = WikiLookup('data/wiki_lookup.2018.json')
-        question_encoder_path = 'models/guesser_question_encoder_5.pth.tar'
-        context_encoder_path = 'models/guesser_context_encoder_5.pth.tar'
+        question_encoder_path = 'models/guesser_question_encoder_last_50.pth.tar'
+        context_encoder_path = 'models/guesser_context_encoder_last_50.pth.tar'
 
         self.question_model = DPRQuestionEncoder.from_pretrained("facebook/dpr-question_encoder-single-nq-base").to(device)
         self.context_model = DPRContextEncoder.from_pretrained("facebook/dpr-ctx_encoder-single-nq-base").to(device)
         if os.path.isfile(question_encoder_path) and from_checkpoint:
             print(f'loading question model from checkpoint {question_encoder_path}')
-            self.question_model = torch.load(question_encoder_path, map_location=device)
+            temp = torch.load(question_encoder_path)
+            self.question_model = temp.module
+            # self.question_model.load_state_dict(self.quest.module.state_dict()
         if os.path.isfile(context_encoder_path) and from_checkpoint:
             print(f'loading context model from checkpoint {context_encoder_path}')
-            self.context_model = torch.load(context_encoder_path, map_location=device)
-    
-        self.train_pages = [x.page for x in QantaDatabase('data/qanta.train.2018.json').guess_train_questions]
+            self.context_model = torch.load(context_encoder_path).module
+            # self.context_model = self.context_model.module.state_dict()
+
+        if self.dataset_name == 'qanta':
+            self.train_pages = [x.page for x in QantaDatabase('data/qanta.train.2018.json').guess_train_questions]
+        elif self.dataset_name == 'squad':
+            data = get_squad_train()
+            self.train_pages = [x.page for x in data.guess_train_questions]
+        else:
+            raise NotImplementedError
 
     def get_guesser_scheduler(self, optimizer, warmup_steps, total_training_steps, steps_shift=0, last_epoch=-1):
 
@@ -171,13 +205,13 @@ class Guesser(BaseGuesser):
         torch.save(self.question_model, f'models/guesser_question_encoder_new.pth.tar')
         torch.save(self.context_model, f'models/guesser_context_encoder_new.pth.tar')
 
-    def train(self, training_data: QantaDatabase, limit: int=-1):
+    def train(self, training_data: QantaDatabase, dataset_name, model_name, limit: int=-1):
         print('Running Guesser.train()', flush=True)
         ### GET TRAIN EMBEDDINGS ###
         BATCH_SIZE = 256
         DIMENSION = 768 ### TODO: double check embed length
 
-        train_dataset = GuessTrainDataset(training_data, self.tokenizer, self.wiki_lookup, 'train')
+        train_dataset = GuessTrainDataset(training_data, self.tokenizer, self.wiki_lookup, dataset_name)
         train_dataloader = torch.utils.data.DataLoader(train_dataset, num_workers=4, batch_size=BATCH_SIZE, pin_memory=True, drop_last=False, shuffle=False)
 
         for parameter in self.context_model.parameters():
@@ -189,11 +223,11 @@ class Guesser(BaseGuesser):
             for i, batch in enumerate(train_dataloader):
                 answers = batch['answer_text'].to(device)
                 context_embeddings[i*BATCH_SIZE:min(len(train_dataset), (i+1)*BATCH_SIZE)] = self.context_model(answers).pooler_output
-        torch.save(context_embeddings, 'models/context_embeddings.pth.tar')
+        torch.save(context_embeddings, f'models/{dataset_name}_{model_name}_context_embeddings.pth.tar')
 
-    def build_faiss_index(self):
+    def build_faiss_index(self, dataset_name='qanta', model_name='dpr'):
         DIMENSION = 768 ### TODO: double check embed length
-        context_embeddings = torch.load('models/context_embeddings.pth.tar').numpy()
+        context_embeddings = torch.load(f'models/{dataset_name}_{model_name}_context_embeddings.pth.tar').numpy()
         self.index = faiss.IndexFlatL2(DIMENSION)
         self.index.add(context_embeddings)
 
@@ -412,7 +446,8 @@ class Retriever:
      - ReRanker that then reranks these top K documents by comparing each of them with the question to produce a similarity score."""
 
     def __init__(self, guesser: BaseGuesser, reranker: BaseReRanker, wiki_lookup: Union[str, WikiLookup],
-                 max_n_guesses=10) -> None:
+                 max_n_guesses=50) -> None:
+        print(max_n_guesses)
         if isinstance(wiki_lookup, str):
             self.wiki_lookup = WikiLookup(wiki_lookup)
         else:
@@ -437,16 +472,23 @@ class Retriever:
         best_doc_id = self.reranker.get_best_document(question, ref_texts)
         return guesses[best_doc_id][0]
 
-    def retrieve_answer_document_batch(self, questions: List[str], disable_reranking=False) -> List[str]:
+    def retrieve_answer_document_batch(self, questions: List[str], disable_reranking=False, topk=20) -> List[str]:
         """Returns the best guessed page that contains the answer to the question."""
+        print(topk)
         guesses_comb = self.guesser.guess(questions, max_n_guesses=self.max_n_guesses)
         guesses_comb = np.asarray(guesses_comb)
         batch_size = len(questions)
+        # import pdb
+        # pdb.set_trace()
         if disable_reranking:
-            max_inds = np.expand_dims(np.argmax(np.asarray(guesses_comb)[:, :, 1], axis=-1), axis=-1)
-            best_pages = guesses_comb[np.arange(batch_size)[:, None], max_inds, :].reshape(batch_size, 2)[:, 0]
+            # max_inds = np.expand_dims(np.argmax(np.asarray(guesses_comb)[:, :, 1], axis=-1), axis=-1)
+            # best_pages = guesses_comb[np.arange(batch_size)[:, None], max_inds, :].reshape(batch_size, 2)[:, 0]
+            # return best_pages
+            max_inds = np.argpartition(np.asarray(guesses_comb)[:, :, 1], -topk, axis=-1)[:, -topk:]
+            best_pages = guesses_comb[np.arange(batch_size)[:, None], max_inds, :][:, :, 0]
             return best_pages
 
+        # This part does not support topk
         ref_texts = []
         for guesses in guesses_comb:
             for page, score in guesses:
@@ -734,7 +776,7 @@ if __name__ == "__main__":
         guesser.load(from_checkpoint=False)
         guesser.finetune(guesstrain, limit=flags.limit)
         guesser.train(guesstrain)
-        guesser.build_faiss_index()
+        guesser.build_faiss_index('qanta')
 
         if flags.show_confusion_matrix:
             confusion = guesser.confusion_matrix(guessdev, limit=-1)

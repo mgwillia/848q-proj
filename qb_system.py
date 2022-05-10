@@ -2,21 +2,29 @@ from typing import List, Union, Tuple
 from tqdm import tqdm
 from qbdata import QantaDatabase
 import torch
-from pip import main
 from tfidf_guesser import TfidfGuesser
-from models import AnswerExtractor, Retriever, ReRanker, WikiLookup
+from models import AnswerExtractor, Retriever, ReRanker, WikiLookup, Guesser, get_squad_train
 
 
 class QuizBowlSystem:
 
-    def __init__(self, wiki_lookup_path: str = '../data/wiki_lookup.2018.json') -> None:
+    def __init__(self, dataset_name, model_name, wiki_lookup_path: str = 'data/wiki_lookup.2018.json') -> None:
         """Fill this method to create attributes, load saved models, etc
         Don't add any other arguments to this constructor. 
         If you really want to have arguments, they should have some default values set.
         """
-        guesser = TfidfGuesser()
+        guesser = Guesser(dataset_name)
         print('Loading the Guesser model...')
-        guesser.load('models/tfidf.pickle')
+        guesser.load()
+        if dataset_name == 'qanta':
+            guesstrain = QantaDatabase('data/qanta.train.2018.json')
+        elif dataset_name == 'squad':
+            guesstrain = get_squad_train()
+        else:
+            raise NotImplementedError
+        # guesser.finetune(guesstrain, limit=-1)
+        guesser.train(guesstrain, dataset_name, model_name)
+        guesser.build_faiss_index(dataset_name, model_name)
 
         print('Loding the Wiki Lookups...')
         self.wiki_lookup = WikiLookup(wiki_lookup_path)
