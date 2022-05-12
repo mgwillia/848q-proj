@@ -80,19 +80,6 @@ def generate_last_sent_predictions_batch(model: QuizBowlSystem, questions: Itera
     return pred_dict
 
 
-def compute_retieval_metrics(prediction_dict: Mapping, questions: Iterable[Question]):
-    N = 0
-    accuracy = 0
-    for ques in questions:
-        N += 1
-        page_pred = prediction_dict.get(ques.qanta_id, '')
-        # print([page_pred], ques.page)
-
-    return {
-        'accuracy': accuracy
-    }
-
-
 def compute_metrics(prediction_dict: Mapping, questions: Iterable[Question]):
     N = 0
     # em = 0
@@ -130,9 +117,9 @@ if __name__ == "__main__":
     argparser.add_argument("--guesser_model", help="Pickle file path for TfidfGuesser model.",
                            type=str, default="models/tfidf.pickle")
     argparser.add_argument("--eval_dataset", help="Dataset Path for the eval dataset. Must be Qanta Json format.",
-                           type=str, default="../data/qanta.dev.2018.json")
+                           type=str, default="data/qanta.dev.2018.json")
     argparser.add_argument("--train_dataset", help="Dataset Path for the TRAIN dataset. Must be Qanta Json format.",
-                           type=str, default="../data/qanta.train.2018.json")
+                           type=str, default="data/qanta.train.2018.json")
     argparser.add_argument('--mode', type=str, choices=["predict", "eval"],
                            help="Only saves the predictions in predict mode. Also computes metrics in eval mode.")
 
@@ -171,8 +158,6 @@ if __name__ == "__main__":
     if args.mode == 'eval':
         metrics = compute_metrics(pred_dict, eval_questions)
 
-        print(f'First Sent Exact Match Accuracy : {metrics["em"]:.2f}')
-        print(f'First Sent mean F1 score        : {metrics["f1"]:.2f}')
         print(f'First Sent Retrieval Accuracy   : {metrics["ret_accuracy"]:.2f}')
         print('')
 
@@ -183,6 +168,4 @@ if __name__ == "__main__":
     if args.mode == 'eval':
         metrics = compute_metrics(pred_dict, eval_questions)
 
-        print(f'Last Sent Exact Match Accuracy : {metrics["em"]:.2f}')
-        print(f'Last Sent mean F1 score        : {metrics["f1"]:.2f}')
         print(f'Last Sent Retrieval Accuracy   : {metrics["ret_accuracy"]:.2f}')

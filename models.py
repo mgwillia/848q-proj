@@ -18,6 +18,7 @@ from transformers import (AdamW, AutoModelForQuestionAnswering,
                           TrainingArguments, default_data_collator,
                           get_cosine_with_hard_restarts_schedule_with_warmup,
                           get_scheduler)
+from transformers import DPRConfig
 
 from base_models import BaseGuesser, BaseReRanker
 from guess_train_dataset import GuessTrainDataset
@@ -79,6 +80,30 @@ class Guesser(BaseGuesser):
         question_encoder_path = 'models/guesser_question_encoder_5.pth.tar'
         context_encoder_path = 'models/guesser_context_encoder_5.pth.tar'
 
+        #dpr_config = DPRConfig()
+        #print(dpr_config, flush=True)
+        #print(dpr_config.projection_dim, flush=True)
+        #dpr_config.projection_dim = 768
+        #print(dpr_config.projection_dim, flush=True)
+
+        #self.question_model = DPRQuestionEncoder(config=dpr_config).to(device)
+        #saved_question_model = torch.load('models/question_encoder_pretrained.pth.tar')
+        #saved_question_model['question_encoder.encode_proj.weight'] = saved_question_model['question_encoder.bert_model.pooler.dense.weight']
+        #saved_question_model['question_encoder.encode_proj.bias'] = saved_question_model['question_encoder.bert_model.pooler.dense.bias']
+        #del saved_question_model['question_encoder.bert_model.pooler.dense.weight']
+        #del saved_question_model['question_encoder.bert_model.pooler.dense.bias']
+        #missing = self.question_model.load_state_dict(saved_question_model, strict=False)
+        #print(missing)
+
+        #self.context_model = DPRContextEncoder(config=dpr_config).to(device)
+        #saved_context_model = torch.load('models/context_encoder_pretrained.pth.tar')
+        #saved_context_model['ctx_encoder.encode_proj.weight'] = saved_context_model['ctx_encoder.bert_model.pooler.dense.weight']
+        #saved_context_model['ctx_encoder.encode_proj.bias'] = saved_context_model['ctx_encoder.bert_model.pooler.dense.bias']
+        #del saved_context_model['ctx_encoder.bert_model.pooler.dense.weight']
+        #del saved_context_model['ctx_encoder.bert_model.pooler.dense.bias']
+        #missing = self.context_model.load_state_dict(saved_context_model, strict=False)
+        #print(missing)
+
         self.question_model = DPRQuestionEncoder.from_pretrained("facebook/dpr-question_encoder-single-nq-base").to(device)
         self.context_model = DPRContextEncoder.from_pretrained("facebook/dpr-ctx_encoder-single-nq-base").to(device)
         if os.path.isfile(question_encoder_path) and from_checkpoint:
@@ -114,7 +139,7 @@ class Guesser(BaseGuesser):
 
         ### FIRST, PREP THE DATA ###
         train_dataset = GuessTrainDataset(training_data, self.tokenizer, self.wiki_lookup, 'train', split_rule)
-        train_dataloader = torch.utils.data.DataLoader(train_dataset, num_workers=16, batch_size=batch_size, pin_memory=False, drop_last=True, shuffle=True)
+        train_dataloader = torch.utils.data.DataLoader(train_dataset, num_workers=4, batch_size=batch_size, pin_memory=False, drop_last=True, shuffle=True)
 
         ### THEN, TRAIN THE ENCODERS ###
         question_optim = torch.optim.Adam(self.question_model.parameters(), lr=learning_rate * LR_SCALE_FACTOR, betas=(0.9, 0.999), eps=1e-08, weight_decay=0.0, amsgrad=False)
@@ -127,7 +152,7 @@ class Guesser(BaseGuesser):
         self.question_model.train()
         self.context_model.train()
         for name, param in self.question_model.named_parameters():
-            #print(name)
+            print(name)
             if 'layer' in name:
                 layer_num = int(name.split('.')[4])
                 if layer_num < 11:
@@ -135,7 +160,7 @@ class Guesser(BaseGuesser):
             else:
                 pass#param.requires_grad = False
         for name, param in self.context_model.named_parameters():
-            #print(name)
+            print(name)
             if 'layer' in name:
                 layer_num = int(name.split('.')[4])
                 if layer_num < 11:
@@ -152,7 +177,7 @@ class Guesser(BaseGuesser):
             for batch_num, batch in enumerate(train_dataloader):
                 batch_questions, answers = batch['question'].to(device), batch['answer_text'].to(device)
                 if split_rule == 'full':
-                    question_embeddings = self.question_model(last_sentences).pooler_output
+                    question_embeddings = self.question_model(batch_questions).pooler_output
                     context_embeddings = self.context_model(answers).pooler_output
                     biencoder_loss, correct_biencoder_preds = loss_fn(question_embeddings, context_embeddings, list(range(question_embeddings.shape[0])))
                 elif split_rule == 'last-a':
@@ -172,11 +197,53 @@ class Guesser(BaseGuesser):
                     biencoder_loss, correct_biencoder_preds = loss_fn(last_sentence_embeddings, context_embeddings, list(range(last_sentence_embeddings.shape[0])))
                     question_loss, correct_question_preds = loss_fn(random_sentence_embeddings, last_sentence_embeddings, list(range(last_sentence_embeddings.shape[0])))
                 elif split_rule == 'last-b':
-                    pass
+                    random_sentences = None
+                    last_sentences = None
+                    valid_indices = batch['valid_indices']
+                    random_sentences = torch.zeros((batch_questions.shape[0], batch_questions.shape[-1]), dtype=torch.long).to(device)
+                    last_sentences = torch.zeros((batch_questions.shape[0], batch_questions.shape[-1]), dtype=torch.long).to(device)
+                    for item_idx, valid_index_list in enumerate(valid_indices):
+                        random_idx = random.randint(0, 1)
+                        last_idx = int(valid_index_list.split(',')[-1])
+                        random_sentences[item_idx] = batch_questions[item_idx][random_idx]
+                        last_sentences[item_idx] = batch_questions[item_idx][last_idx]
+                    random_sentence_embeddings = self.question_model(random_sentences).pooler_output
+                    last_sentence_embeddings = self.question_model(last_sentences).pooler_output.detach()
+                    context_embeddings = self.context_model(answers).pooler_output
+                    biencoder_loss, correct_biencoder_preds = loss_fn(last_sentence_embeddings, context_embeddings, list(range(last_sentence_embeddings.shape[0])))
+                    question_loss, correct_question_preds = loss_fn(random_sentence_embeddings, last_sentence_embeddings, list(range(last_sentence_embeddings.shape[0])))
                 elif split_rule == 'last-c':
-                    pass
+                    random_sentences = None
+                    last_sentences = None
+                    valid_indices = batch['valid_indices']
+                    random_sentences = torch.zeros((batch_questions.shape[0], batch_questions.shape[-1]), dtype=torch.long).to(device)
+                    last_sentences = torch.zeros((batch_questions.shape[0], batch_questions.shape[-1]), dtype=torch.long).to(device)
+                    for item_idx, valid_index_list in enumerate(valid_indices):
+                        random_idx = int(valid_index_list.split(',')[-2])
+                        last_idx = int(valid_index_list.split(',')[-1])
+                        random_sentences[item_idx] = batch_questions[item_idx][random_idx]
+                        last_sentences[item_idx] = batch_questions[item_idx][last_idx]
+                    random_sentence_embeddings = self.question_model(random_sentences).pooler_output.detach()
+                    last_sentence_embeddings = self.question_model(last_sentences).pooler_output
+                    context_embeddings = self.context_model(answers).pooler_output
+                    biencoder_loss, correct_biencoder_preds = loss_fn(last_sentence_embeddings, context_embeddings, list(range(last_sentence_embeddings.shape[0])))
+                    question_loss, correct_question_preds = loss_fn(random_sentence_embeddings, last_sentence_embeddings, list(range(last_sentence_embeddings.shape[0])))
                 elif split_rule == 'last-d':
-                    pass
+                    random_sentences = None
+                    last_sentences = None
+                    valid_indices = batch['valid_indices']
+                    random_sentences = torch.zeros((batch_questions.shape[0], batch_questions.shape[-1]), dtype=torch.long).to(device)
+                    last_sentences = torch.zeros((batch_questions.shape[0], batch_questions.shape[-1]), dtype=torch.long).to(device)
+                    for item_idx, valid_index_list in enumerate(valid_indices):
+                        first_idx = int(valid_index_list.split(',')[0])
+                        last_idx = int(valid_index_list.split(',')[-1])
+                        random_sentences[item_idx] = batch_questions[item_idx][first_idx]
+                        last_sentences[item_idx] = batch_questions[item_idx][last_idx]
+                    random_sentence_embeddings = self.question_model(random_sentences).pooler_output.detach()
+                    last_sentence_embeddings = self.question_model(last_sentences).pooler_output
+                    context_embeddings = self.context_model(answers).pooler_output
+                    biencoder_loss, correct_biencoder_preds = loss_fn(last_sentence_embeddings, context_embeddings, list(range(last_sentence_embeddings.shape[0])))
+                    question_loss, correct_question_preds = loss_fn(random_sentence_embeddings, last_sentence_embeddings, list(range(last_sentence_embeddings.shape[0])))
                     
                 if split_rule != 'full':
                     batch_loss = question_loss * scaling_param + biencoder_loss
@@ -192,11 +259,15 @@ class Guesser(BaseGuesser):
                 context_scheduler.step()
 
                 losses.append(batch_loss.item())
-                correct_question_preds_total.append(correct_question_preds.item())
+                if split_rule != 'full':
+                    correct_question_preds_total.append(correct_question_preds.item())
                 correct_biencoder_preds_total.append(correct_biencoder_preds.item())
 
                 if batch_num % 8 == 7:
-                    print(f'Epoch Num: {epoch_num}, Batch Num: {batch_num}, Loss: {np.array(losses).mean()}, Correct question preds per batch: {np.array(correct_question_preds_total).mean()}, Correct biencoder preds per batch: {np.array(correct_biencoder_preds_total).mean()}', flush=True)
+                    if 'last' in split_rule:
+                        print(f'Epoch Num: {epoch_num}, Batch Num: {batch_num}, Loss: {np.array(losses).mean()}, Correct question preds per batch: {np.array(correct_question_preds_total).mean()}, Correct biencoder preds per batch: {np.array(correct_biencoder_preds_total).mean()}', flush=True)
+                    else:
+                        print(f'Epoch Num: {epoch_num}, Batch Num: {batch_num}, Loss: {np.array(losses).mean()}, Correct biencoder preds per batch: {np.array(correct_biencoder_preds_total).mean()}', flush=True)
                     losses = []
                     correct_question_preds_total = []
                     correct_biencoder_preds_total = []
@@ -207,13 +278,13 @@ class Guesser(BaseGuesser):
         torch.save(self.question_model, f'models/guesser_question_encoder_{split_rule}_{batch_size}_{learning_rate}_{scaling_param}.pth.tar')
         torch.save(self.context_model, f'models/guesser_context_encoder_{split_rule}_{batch_size}_{learning_rate}_{scaling_param}.pth.tar')
 
-    def train(self, training_data: QantaDatabase, limit: int=-1):
+    def train(self, training_data: QantaDatabase, split_rule: str='full', limit: int=-1):
         print('Running Guesser.train()', flush=True)
         ### GET TRAIN EMBEDDINGS ###
         BATCH_SIZE = 256
         DIMENSION = 768 ### TODO: double check embed length
 
-        train_dataset = GuessTrainDataset(training_data, self.tokenizer, self.wiki_lookup, 'train')
+        train_dataset = GuessTrainDataset(training_data, self.tokenizer, self.wiki_lookup, 'train', split_rule)
         train_dataloader = torch.utils.data.DataLoader(train_dataset, num_workers=4, batch_size=BATCH_SIZE, pin_memory=True, drop_last=False, shuffle=False)
 
         for parameter in self.context_model.parameters():
@@ -230,7 +301,7 @@ class Guesser(BaseGuesser):
     def build_faiss_index(self):
         DIMENSION = 768 ### TODO: double check embed length
         context_embeddings = torch.load('models/context_embeddings.pth.tar').numpy()
-        self.index = faiss.IndexFlatL2(DIMENSION)
+        self.index = faiss.IndexFlatIP(DIMENSION)
         self.index.add(context_embeddings)
 
     def guess(self, questions: List[str], max_n_guesses: Optional[int]) -> List[List[Tuple[str, float]]]:
@@ -367,7 +438,7 @@ if __name__ == "__main__":
         guesser = Guesser()
         guesser.load(from_checkpoint=False)
         guesser.finetune(guesstrain, flags.batch_size, flags.learning_rate, flags.split_rule, flags.scaling_param, limit=flags.limit)
-        guesser.train(guesstrain)
+        guesser.train(guesstrain, flags.split_rule)
         guesser.build_faiss_index()
 
         if flags.show_confusion_matrix:
