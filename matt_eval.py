@@ -87,7 +87,7 @@ if __name__ == "__main__":
             
             neighbor_scores, neighbor_indices = index.search(last_sentence_embeddings.cpu().numpy(), 1)
             for i in range(last_sentence_embeddings.shape[0]):
-                print(neighbor_scores[i])
+                #print(neighbor_scores[i])
                 pred_page = train_pages[train_page_idxs_unique[neighbor_indices[i][0]]]
                 gt_page = gt_pages[i]
                 if pred_page == gt_page:
