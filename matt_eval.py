@@ -87,7 +87,7 @@ if __name__ == "__main__":
                 last_sentences[item_idx] = batch_questions[item_idx][last_idx]
             last_sentence_embeddings = question_model(last_sentences).pooler_output
             
-            neighbor_scores, neighbor_indices = index.search(last_sentence_embeddings.cpu().numpy(), 100)
+            neighbor_scores, neighbor_indices = index.search(last_sentence_embeddings.cpu().numpy(), flags.topk)
             # pdb.set_trace()
             for i in range(last_sentence_embeddings.shape[0]):
 
