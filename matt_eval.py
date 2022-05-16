@@ -19,7 +19,7 @@ if __name__ == "__main__":
     parser.add_argument("--train_data", default="data/qanta.train.2018.json", type=str)
     parser.add_argument("--dev_data", default="data/qanta.dev.2018.json", type=str)
     parser.add_argument("--batch_size", default=32, type=int)
-    parser.add_argument("--topk", default=100, type=int)
+    parser.add_argument("--topk", default=50, type=int)
     parser.add_argument("--learning_rate", default=1e-5, type=float)
     parser.add_argument("--split_rule", default="full", type=str)
     parser.add_argument("--scaling_param", default=1.0, type=float)
