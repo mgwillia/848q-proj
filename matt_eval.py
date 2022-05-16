@@ -90,6 +90,7 @@ if __name__ == "__main__":
             neighbor_scores, neighbor_indices = index.search(last_sentence_embeddings.cpu().numpy(), 100)
             # pdb.set_trace()
             for i in range(last_sentence_embeddings.shape[0]):
+
                 # print(neighbor_scores[i])
                 pred_pages = []
                 for j in range(neighbor_indices.shape[1]):

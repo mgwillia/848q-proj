@@ -33,6 +33,7 @@ if __name__ == "__main__":
     ## get train dataset
     guesstrain = QantaDatabase(flags.train_data)
     guessdev = QantaDatabase(flags.dev_data)
+    train_dataset = GuessTrainDataset(guesstrain, tokenizer, wiki_lookup, 'train', 'last')
     dev_dataset = GuessTrainDataset(guessdev, tokenizer, wiki_lookup, 'dev', 'analysis')
     train_pages = [x.page for x in guesstrain.train_questions]
     print(len(train_pages), len(train_dataset), len(guesstrain.train_questions))
@@ -75,13 +76,14 @@ if __name__ == "__main__":
         parameter.requires_grad = False
     question_model.eval()
     print('Computing both embeddings for dev', flush=True)
+    avg_inter_clue_dists = []
+    avg_clue_ctx_dists = []
     with torch.no_grad():
         for i, batch in enumerate(dev_dataloader):
-            question, answer, page = batch['question'].to_device, batch['answer_text'].to(device), batch['answer_page']
-            clue_embeddings = []
-            for j in range(question.shape[0]):
-                clue_embeddings.append(question_model(last_sentences).pooler_output)
-            answer_embedding = context_model(answers).pooler_output
+            question, answer, page = batch['question'].to(device), batch['answer_text'].to(device), batch['answer_page']
+            question = question.squeeze()
+            clue_embeddings = question_model(question).pooler_output
+            answer_embedding = context_model(answer).pooler_output
             
             inter_clue_dist_sum = 0.0
             clue_ctx_dist_sum = 0.0
@@ -96,16 +98,18 @@ if __name__ == "__main__":
             ### SO, WHAT DOES IT DO? ONLY MOVE CLUES CLOSER? OR AFFECT CONTEXT ALSO?
             avg_inter_clue_dist = inter_clue_dist_sum / ((len(clue_embeddings) - 1) ** 2)
             avg_clue_ctx_dist = clue_ctx_dist_sum / len(clue_embeddings)
-
-"""            
-            neighbor_scores, neighbor_indices = index.search(last_sentence_embeddings.cpu().numpy(), 1)
-            for i in range(last_sentence_embeddings.shape[0]):
-                print(neighbor_scores[i])
-                pred_page = train_pages[train_page_idxs_unique[neighbor_indices[i][0]]]
-                gt_page = gt_pages[i]
-                if pred_page == gt_page:
-                    num_correct_preds += 1
-"""
+            avg_inter_clue_dists.append(avg_inter_clue_dist)
+            avg_clue_ctx_dists.append(avg_clue_ctx_dist)
+    print(np.array(avg_inter_clue_dists).mean())
+    print(np.array(avg_clue_ctx_dists).mean())
+ 
+#            neighbor_scores, neighbor_indices = index.search(last_sentence_embeddings.cpu().numpy(), 1)
+#            for i in range(last_sentence_embeddings.shape[0]):
+#                print(neighbor_scores[i])
+#                pred_page = train_pages[train_page_idxs_unique[neighbor_indices[i][0]]]
+#                gt_page = gt_pages[i]
+#                if pred_page == gt_page:
+#                    num_correct_preds += 1
 
     ## accuracy
-    print(f'Top-1 Retrieval accuracy: {num_correct_preds / len(dev_dataset)}')
+    #print(f'Top-1 Retrieval accuracy: {num_correct_preds / len(dev_dataset)}')
