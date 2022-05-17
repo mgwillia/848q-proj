@@ -29,6 +29,7 @@ if __name__ == "__main__":
     ## initialize both encoders 
     question_model = DPRQuestionEncoder.from_pretrained("facebook/dpr-question_encoder-single-nq-base").to(device)
     context_model = DPRContextEncoder.from_pretrained("facebook/dpr-ctx_encoder-single-nq-base").to(device)
+    
     tokenizer = BertTokenizerFast.from_pretrained("bert-base-uncased")
     wiki_lookup = WikiLookup('data/wiki_lookup.2018.json')
 

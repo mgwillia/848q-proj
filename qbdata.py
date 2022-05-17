@@ -1,6 +1,7 @@
 from typing import List, Dict, Iterable, Optional, Tuple, NamedTuple
 import os
 import json
+import pdb
 
 GUESSER_TRAIN_FOLD = 'guesstrain'
 BUZZER_TRAIN_FOLD = 'buzztrain'
@@ -72,27 +73,130 @@ class Question(NamedTuple):
         char_indices = list(range(char_skip, len(self.text) + char_skip, char_skip))
         return [self.text[:i] for i in char_indices], char_indices
 
+# class QantaDatabase:
+#     def __init__(self, dataset_path=os.path.join('data')):
+#         with open(dataset_path) as f:
+#             self.dataset = json.load(f)
 
+#         self.version = self.dataset['version']
+#         self.raw_questions = self.dataset['questions']
+#         self.all_questions = [Question(**q) for q in self.raw_questions]
+#         self.mapped_questions = [q for q in self.all_questions if q.page is not None]
+
+#         self.train_questions = [q for q in self.mapped_questions if q.fold in TRAIN_FOLDS]
+#         self.guess_train_questions = [q for q in self.train_questions if q.fold == GUESSER_TRAIN_FOLD]
+#         self.buzz_train_questions = [q for q in self.train_questions if q.fold == BUZZER_TRAIN_FOLD]
+
+#         self.dev_questions = [q for q in self.mapped_questions if q.fold in DEV_FOLDS]
+#         self.guess_dev_questions = [q for q in self.dev_questions if q.fold == GUESSER_DEV_FOLD]
+#         self.buzz_dev_questions = [q for q in self.dev_questions if q.fold == BUZZER_DEV_FOLD]
+
+#         self.buzz_test_questions = [q for q in self.mapped_questions if q.fold == BUZZER_TEST_FOLD]
+#         self.guess_test_questions = [q for q in self.mapped_questions if q.fold == GUESSER_TEST_FOLD]
+
+#     def by_fold(self):
+#         return {
+#             GUESSER_TRAIN_FOLD: self.guess_train_questions,
+#             GUESSER_DEV_FOLD: self.guess_dev_questions,
+#             BUZZER_TRAIN_FOLD: self.buzz_train_questions,
+#             BUZZER_DEV_FOLD: self.buzz_dev_questions,
+#             BUZZER_TEST_FOLD: self.buzz_test_questions,
+#             GUESSER_TEST_FOLD: self.guess_test_questions
+#         }
+
+def get_squad_questions(filename: str):
+    questions = []
+    with open(filename, 'r') as fp:
+        data = json.load(fp)
+
+    for data_point in data['data']:
+        for paragraph in data_point['paragraphs']:
+            for ques in paragraph['qas']:
+                sentences = [ques['question']]
+                if 'dev' in filename:
+                    fold = GUESSER_DEV_FOLD
+                elif 'train' in filename:
+                    fold = GUESSER_TRAIN_FOLD
+                    
+                # pdb.set_trace()
+                temp = Question(qanta_id=data_point['title'], text=' '.join(sentences),
+                                first_sentence=sentences[0], tokenizations=[0,0], answer='',
+                               page = data_point['title'], fold=fold,gameplay=True, 
+                                category='',subcategory='',
+                               tournament='',difficulty='',year=0,proto_id=ques['id'],qdb_id=ques['id'],
+                               dataset='squad',answer_prompt='')
+                # temp.sentences = [ques['question']]
+                # temp.first_sentence = temp.sentences[0]
+                # temp.qanta_id = ques['id']
+                questions.append(temp)
+    return questions
+    
+# class QantaDatabase:
+#     def __init__(self, dataset_path=os.path.join('data'), dataset_name='qanta'):
+#         with open(dataset_path) as f:
+#             self.dataset = json.load(f)
+
+#         self.version = self.dataset['version']
+#         # self.raw_questions = get_squad_questions(dataset_path)
+#         self.all_questions = get_squad_questions(dataset_path)
+#         self.mapped_questions = [q for q in self.all_questions if q.page is not None]
+
+#         self.train_questions = [q for q in self.mapped_questions if q.fold in TRAIN_FOLDS]
+#         self.guess_train_questions = [q for q in self.train_questions if q.fold == GUESSER_TRAIN_FOLD]
+#         self.buzz_train_questions = [q for q in self.train_questions if q.fold == BUZZER_TRAIN_FOLD]
+
+#         self.dev_questions = [q for q in self.mapped_questions if q.fold in DEV_FOLDS]
+#         self.guess_dev_questions = [q for q in self.dev_questions if q.fold == GUESSER_DEV_FOLD]
+#         self.buzz_dev_questions = [q for q in self.dev_questions if q.fold == BUZZER_DEV_FOLD]
+
+#         self.buzz_test_questions = [q for q in self.mapped_questions if q.fold == BUZZER_TEST_FOLD]
+#         self.guess_test_questions = [q for q in self.mapped_questions if q.fold == GUESSER_TEST_FOLD]
+
+#     def by_fold(self):
+#         return {
+#             GUESSER_TRAIN_FOLD: self.guess_train_questions,
+#             GUESSER_DEV_FOLD: self.guess_dev_questions,
+#             BUZZER_TRAIN_FOLD: self.buzz_train_questions,
+#             BUZZER_DEV_FOLD: self.buzz_dev_questions,
+#             BUZZER_TEST_FOLD: self.buzz_test_questions,
+#             GUESSER_TEST_FOLD: self.guess_test_questions
+#         }
+    
 class QantaDatabase:
-    def __init__(self, dataset_path=os.path.join('data')):
+    def __init__(self, dataset_path=os.path.join('data'), dataset_name='squad'):
         with open(dataset_path) as f:
             self.dataset = json.load(f)
 
         self.version = self.dataset['version']
-        self.raw_questions = self.dataset['questions']
-        self.all_questions = [Question(**q) for q in self.raw_questions]
-        self.mapped_questions = [q for q in self.all_questions if q.page is not None]
+        if dataset_name =='qanta':
+            self.raw_questions = self.dataset['questions']
+            self.all_questions = [Question(**q) for q in self.raw_questions]
+            self.mapped_questions = [q for q in self.all_questions if q.page is not None]
 
-        self.train_questions = [q for q in self.mapped_questions if q.fold in TRAIN_FOLDS]
-        self.guess_train_questions = [q for q in self.train_questions if q.fold == GUESSER_TRAIN_FOLD]
-        self.buzz_train_questions = [q for q in self.train_questions if q.fold == BUZZER_TRAIN_FOLD]
+            self.train_questions = [q for q in self.mapped_questions if q.fold in TRAIN_FOLDS]
+            self.guess_train_questions = [q for q in self.train_questions if q.fold == GUESSER_TRAIN_FOLD]
+            self.buzz_train_questions = [q for q in self.train_questions if q.fold == BUZZER_TRAIN_FOLD]
 
-        self.dev_questions = [q for q in self.mapped_questions if q.fold in DEV_FOLDS]
-        self.guess_dev_questions = [q for q in self.dev_questions if q.fold == GUESSER_DEV_FOLD]
-        self.buzz_dev_questions = [q for q in self.dev_questions if q.fold == BUZZER_DEV_FOLD]
+            self.dev_questions = [q for q in self.mapped_questions if q.fold in DEV_FOLDS]
+            self.guess_dev_questions = [q for q in self.dev_questions if q.fold == GUESSER_DEV_FOLD]
+            self.buzz_dev_questions = [q for q in self.dev_questions if q.fold == BUZZER_DEV_FOLD]
 
-        self.buzz_test_questions = [q for q in self.mapped_questions if q.fold == BUZZER_TEST_FOLD]
-        self.guess_test_questions = [q for q in self.mapped_questions if q.fold == GUESSER_TEST_FOLD]
+            self.buzz_test_questions = [q for q in self.mapped_questions if q.fold == BUZZER_TEST_FOLD]
+            self.guess_test_questions = [q for q in self.mapped_questions if q.fold == GUESSER_TEST_FOLD]
+        elif dataset_name == 'squad':
+            self.all_questions = get_squad_questions(dataset_path)
+            self.mapped_questions = [q for q in self.all_questions if q.page is not None]
+
+            self.train_questions = [q for q in self.mapped_questions if q.fold in TRAIN_FOLDS]
+            self.guess_train_questions = [q for q in self.train_questions if q.fold == GUESSER_TRAIN_FOLD]
+            self.buzz_train_questions = [q for q in self.train_questions if q.fold == BUZZER_TRAIN_FOLD]
+
+            self.dev_questions = [q for q in self.mapped_questions if q.fold in DEV_FOLDS]
+            self.guess_dev_questions = [q for q in self.dev_questions if q.fold == GUESSER_DEV_FOLD]
+            self.buzz_dev_questions = [q for q in self.dev_questions if q.fold == BUZZER_DEV_FOLD]
+
+            self.buzz_test_questions = [q for q in self.mapped_questions if q.fold == BUZZER_TEST_FOLD]
+            self.guess_test_questions = [q for q in self.mapped_questions if q.fold == GUESSER_TEST_FOLD]
 
     def by_fold(self):
         return {

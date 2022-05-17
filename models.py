@@ -63,6 +63,42 @@ class BiEncoderNllLoss(torch.nn.Module):
         correct_predictions_count = (max_idxs == torch.tensor(positive_idx_per_question).to(max_idxs.device)).sum()
 
         return loss, correct_predictions_count
+    
+class VanilaNllLoss(torch.nn.Module):
+
+    def __init__(self):
+        super(VanilaNllLoss, self).__init__()
+
+    def forward(
+        self,
+        q_vectors: torch.Tensor,
+        ctx_vectors: torch.Tensor,
+        positive_idx_per_question: list,
+    ) -> Tuple[torch.Tensor, int]:
+        """
+        Computes nll loss for the given lists of question and ctx vectors.
+        Note that although hard_negative_idx_per_question in not currently in use, one can use it for the
+        loss modifications. For example - weighted NLL with different factors for hard vs regular negatives.
+        :return: a tuple of loss value and amount of correct predictions per batch
+        """
+        scores = torch.matmul(q_vectors, torch.transpose(ctx_vectors, 0, 1))
+
+        if len(q_vectors.size()) > 1:
+            q_num = q_vectors.size(0)
+            scores = scores.view(q_num, -1)
+
+        softmax_scores = F.log_softmax(scores, dim=1)
+
+        loss = F.nll_loss(
+            softmax_scores,
+            torch.tensor(positive_idx_per_question).to(softmax_scores.device),
+            reduction="mean",
+        )
+
+        _, max_idxs = torch.max(softmax_scores, 1)
+        correct_predictions_count = (max_idxs == torch.tensor(positive_idx_per_question).to(max_idxs.device)).sum()
+
+        return loss, correct_predictions_count
 
 
 class Guesser(BaseGuesser):
@@ -113,7 +149,8 @@ class Guesser(BaseGuesser):
             print(f'loading context model from checkpoint {context_encoder_path}')
             self.context_model = torch.load(context_encoder_path, map_location=device)
     
-        self.train_pages = [x.page for x in QantaDatabase('data/qanta.train.2018.json').guess_train_questions]
+        # self.train_pages = [x.page for x in QantaDatabase('data/qanta.train.2018.json').guess_train_questions]
+        self.train_pages = [x.page for x in QantaDatabase('data/squad1.1/train-v1.1.json').guess_train_questions]
 
     def get_guesser_scheduler(self, optimizer, warmup_steps, total_training_steps, steps_shift=0, last_epoch=-1):
 
@@ -134,7 +171,7 @@ class Guesser(BaseGuesser):
 
     def finetune(self, training_data: QantaDatabase, batch_size: int=128, learning_rate: float=1e-5, split_rule: str='full', scaling_param: float=1.0, limit: int=-1):
         NUM_EPOCHS = 5
-        BASE_BATCH_SIZE = 128
+        BASE_BATCH_SIZE = 16
         LR_SCALE_FACTOR = batch_size / BASE_BATCH_SIZE
 
         ### FIRST, PREP THE DATA ###
@@ -147,6 +184,7 @@ class Guesser(BaseGuesser):
         question_scheduler = self.get_guesser_scheduler(question_optim, 100, NUM_EPOCHS * (len(train_dataset) // batch_size))
         context_scheduler = self.get_guesser_scheduler(context_optim, 100, NUM_EPOCHS * (len(train_dataset) // batch_size))
         loss_fn = BiEncoderNllLoss()
+        # loss_fn = torch.nn.NLLLoss()
 
         print('Ready to finetune', flush=True)
         self.question_model.train()
@@ -281,7 +319,7 @@ class Guesser(BaseGuesser):
     def train(self, training_data: QantaDatabase, split_rule: str='full', limit: int=-1):
         print('Running Guesser.train()', flush=True)
         ### GET TRAIN EMBEDDINGS ###
-        BATCH_SIZE = 256
+        BATCH_SIZE = 16
         DIMENSION = 768 ### TODO: double check embed length
 
         train_dataset = GuessTrainDataset(training_data, self.tokenizer, self.wiki_lookup, 'train', split_rule)
@@ -415,9 +453,13 @@ class Retriever:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--train_data", default="data/qanta.train.2018.json", type=str)
-    parser.add_argument("--dev_data", default="data/qanta.dev.2018.json", type=str)
-    parser.add_argument("--batch_size", default=128, type=int)
+    # parser.add_argument("--train_data", default="data/qanta.train.2018.json", type=str)
+    # parser.add_argument("--dev_data", default="data/qanta.dev.2018.json", type=str)
+    parser.add_argument("--train_data", default="data/squad1.1/train-v1.1.json", type=str)
+    # parser.add_argument("--train_data", default="data/qanta.train.2018.json", type=str)
+    #data/squad1.1/train-v1.1.json data/qanta.train.2018.json
+    parser.add_argument("--dev_data", default="data/squad1.1/dev-v1.1.json", type=str) 
+    parser.add_argument("--batch_size", default=16, type=int)
     parser.add_argument("--learning_rate", default=1e-5, type=float)
     parser.add_argument("--split_rule", default="full", type=str)
     parser.add_argument("--scaling_param", default=1.0, type=float)
